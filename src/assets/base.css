@@ -1,0 +1,75 @@
+/* Базовые цвета для темы */
+:root {
+  /* Основные цвета фона */
+  --vt-c-black: #121212;
+  --vt-c-black-soft: #1e1e1e;
+  --vt-c-black-mute: #2c2c2c;
+
+  /* Текстовые цвета */
+  --vt-c-white: #ffffff;
+  --vt-c-white-soft: #e0e0e0;
+  --vt-c-white-mute: #a0a0a0;
+
+  /* Акцентный цвет */
+  --vt-c-accent: #9370DB;
+
+  /* Разделители */
+  --vt-c-divider-dark-1: rgba(84, 84, 84, 0.65);
+  --vt-c-divider-dark-2: rgba(84, 84, 84, 0.48);
+
+  /* Текстовые переменные */
+  --vt-c-text-dark-1: var(--vt-c-white);
+  --vt-c-text-dark-2: var(--vt-c-white-soft);
+  --vt-c-text-dark-3: var(--vt-c-white-mute);
+}
+
+/* Семантические переменные для проекта */
+:root {
+  /* Всегда темная тема */
+  --color-background: var(--vt-c-black);
+  --color-background-soft: var(--vt-c-black-soft);
+  --color-background-mute: var(--vt-c-black-mute);
+
+  --color-border: var(--vt-c-divider-dark-2);
+  --color-border-hover: var(--vt-c-divider-dark-1);
+
+  --color-heading: var(--vt-c-text-dark-1);
+  --color-text: var(--vt-c-text-dark-2);
+  --color-text-mute: var(--vt-c-text-dark-3);
+  
+  --color-accent: var(--vt-c-accent);
+
+  --section-gap: 160px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  font-weight: normal;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--color-text);
+  background: var(--color-background);
+  line-height: 1.6;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    Roboto,
+    Oxygen,
+    Ubuntu,
+    Cantarell,
+    'Fira Sans',
+    'Droid Sans',
+    'Helvetica Neue',
+    sans-serif;
+  font-size: 15px;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
