@@ -151,6 +151,9 @@ async function loadChat() {
     // Получаем информацию о чате
     await chatStore.fetchChatById(chatId.value);
     
+    // Сбрасываем счетчик непрочитанных сообщений в UI сразу
+    chatStore.resetUnreadCount(chatId.value);
+    
     // Сбрасываем параметры загрузки сообщений
     offset.value = 0;
     
@@ -160,7 +163,7 @@ async function loadChat() {
     canLoadMore.value = messages.value.length < totalMessages.value;
     
     // Отмечаем все непрочитанные сообщения от других пользователей как прочитанные
-    markAllMessagesAsRead();
+    await chatStore.markAllMessagesAsRead(chatId.value);
     
     // Подключаемся к чату через WebSocket для получения новых сообщений
     setupWebSocket();
@@ -353,10 +356,30 @@ function setupWebSocket() {
         message.timestamp = new Date().toISOString();
       }
       
+      // Кэшируем ID сообщения, чтобы избежать дублирующей обработки
+      const messageId = message.id || message.client_message_id;
+      const processingCacheKey = `chat-processing-${messageId}-${chatId.value}`;
+      
+      // Проверяем, не обрабатывали ли мы уже это сообщение 
+      if (window[processingCacheKey]) {
+        console.log(`ChatView: Сообщение ${messageId} для чата ${chatId.value} уже обрабатывается, пропускаем`);
+        return;
+      }
+      
+      // Устанавливаем флаг обработки и очищаем его через короткое время
+      window[processingCacheKey] = true;
+      setTimeout(() => {
+        window[processingCacheKey] = false;
+      }, 5000); // Сбрасываем флаг через 5 секунд
+      
       // Добавляем сообщение в чат через хранилище, если его еще нет
-      const messageExists = messages.value.some(m => m.id === message.id);
+      const messageExists = messages.value.some(m => 
+        (m.id && m.id === message.id) || 
+        (m.client_message_id && message.client_message_id && m.client_message_id === message.client_message_id)
+      );
+      
       if (!messageExists) {
-        console.log(`ChatView: Добавляем новое сообщение ${message.id} в чат ${message.chat_id}`);
+        console.log(`ChatView: Добавляем новое сообщение ${messageId} в чат ${message.chat_id}`);
         chatStore.addMessage(message);
         
         // Прокручиваем к новому сообщению
@@ -372,9 +395,12 @@ function setupWebSocket() {
           // Также отмечаем все свои предыдущие сообщения как прочитанные
           // (если пользователь ответил, значит прочитал наши сообщения)
           markOwnMessagesAsRead();
+          
+          // Сбрасываем счетчик непрочитанных сообщений для текущего чата
+          chatStore.resetUnreadCount(chatId.value);
         }
       } else {
-        console.log(`ChatView: Сообщение ${message.id} уже существует в чате, пропускаем`);
+        console.log(`ChatView: Сообщение ${messageId} уже существует в чате, пропускаем`);
       }
     });
     

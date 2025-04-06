@@ -4,10 +4,12 @@ import { v4 as uuidv4 } from 'uuid';
 export class WebSocketService {
   constructor() {
     this.socket = null;
+    this.globalSocket = null; // WebSocket для глобальных уведомлений пользователя
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
     this.reconnectInterval = 3000; // 3 секунды
     this.messageCallbacks = [];
+    this.globalMessageCallbacks = []; // Обработчики для глобальных сообщений
     this.statusCallbacks = [];
     this.errorCallbacks = [];
     this.pendingMessages = new Set();
@@ -91,6 +93,78 @@ export class WebSocketService {
     }
   }
 
+  // Подключение к глобальному WebSocket пользователя
+  connectGlobal(token) {
+    if (this.globalSocket && this.globalSocket.readyState === WebSocket.OPEN) {
+      console.log(`Отключаемся от текущего глобального WebSocket перед переподключением`);
+      this.disconnectGlobal();
+    }
+
+    try {
+      console.log(`Подключаемся к глобальному WebSocket пользователя`);
+      this.globalSocket = new WebSocket(`${WS_BASE_URL}/user?token=${token}`);
+      
+      this.globalSocket.onopen = () => {
+        console.log(`Глобальный WebSocket успешно подключен`);
+        this._notifyStatusCallbacks({ status: 'global_connected' });
+      };
+      
+      this.globalSocket.onmessage = (event) => {
+        try {
+          console.log(`Получены данные глобального WebSocket:`, event.data);
+          const data = JSON.parse(event.data);
+          
+          if (data.error) {
+            console.error(`Глобальный WebSocket ошибка:`, data.error);
+            this._notifyErrorCallbacks(data.error);
+            return;
+          }
+          
+          if (data.type === 'message') {
+            const messageId = data.data.id;
+            console.log(`Получено глобальное сообщение с ID ${messageId} для чата ${data.data.chat_id}`);
+            
+            if (!this.messageCache.has(messageId)) {
+              this.messageCache.add(messageId);
+              // Ограничиваем размер кэша
+              if (this.messageCache.size > 100) {
+                const firstItem = this.messageCache.values().next().value;
+                this.messageCache.delete(firstItem);
+              }
+              this._notifyGlobalMessageCallbacks(data.data);
+            } else {
+              console.log(`Глобальное сообщение с ID ${messageId} уже обработано, пропускаем`);
+            }
+          } else {
+            console.log(`Получено обновление статуса глобального WebSocket:`, data);
+            this._notifyStatusCallbacks(data);
+          }
+        } catch (error) {
+          console.error(`Ошибка при обработке сообщения глобального WebSocket:`, error);
+        }
+      };
+      
+      this.globalSocket.onclose = (event) => {
+        if (!event.wasClean) {
+          console.log(`Глобальное соединение прервано, код: ${event.code}`);
+          this._tryReconnectGlobal(token);
+        } else {
+          console.log(`Глобальное соединение закрыто, код: ${event.code}`);
+          this._notifyStatusCallbacks({ status: 'global_disconnected' });
+        }
+      };
+      
+      this.globalSocket.onerror = (error) => {
+        console.error(`Ошибка глобального WebSocket:`, error);
+        this._notifyErrorCallbacks(`Ошибка глобального соединения WebSocket`);
+      };
+      
+    } catch (error) {
+      console.error(`Ошибка при создании глобального WebSocket:`, error);
+      this._notifyErrorCallbacks(`Не удалось создать глобальное подключение WebSocket`);
+    }
+  }
+
   // Отключение от чата
   disconnect() {
     if (this.socket) {
@@ -99,6 +173,14 @@ export class WebSocketService {
     }
   }
 
+  // Отключение от глобального WebSocket
+  disconnectGlobal() {
+    if (this.globalSocket) {
+      this.globalSocket.close();
+      this.globalSocket = null;
+    }
+  }
+  
   // Отправка сообщения в чат
   sendMessage(text) {
     const messageData = { 
@@ -165,6 +247,14 @@ export class WebSocketService {
     };
   }
 
+  // Добавление обработчика для глобальных сообщений
+  onGlobalMessage(callback) {
+    this.globalMessageCallbacks.push(callback);
+    return () => {
+      this.globalMessageCallbacks = this.globalMessageCallbacks.filter(cb => cb !== callback);
+    };
+  }
+
   // Добавление обработчика для статуса подключения
   onStatusChange(callback) {
     this.statusCallbacks.push(callback);
@@ -199,6 +289,27 @@ export class WebSocketService {
     } else {
       this._notifyErrorCallbacks('Не удалось установить соединение после нескольких попыток');
       this._notifyStatusCallbacks({ status: 'failed' });
+    }
+  }
+
+  // Попытка переподключения глобального WebSocket при обрыве соединения
+  _tryReconnectGlobal(token) {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      console.log(`Попытка переподключения глобального WebSocket ${this.reconnectAttempts}/${this.maxReconnectAttempts}...`);
+      
+      setTimeout(() => {
+        this.connectGlobal(token);
+      }, this.reconnectInterval);
+      
+      this._notifyStatusCallbacks({ 
+        status: 'global_reconnecting', 
+        attempt: this.reconnectAttempts, 
+        maxAttempts: this.maxReconnectAttempts 
+      });
+    } else {
+      this._notifyErrorCallbacks('Не удалось установить глобальное соединение после нескольких попыток');
+      this._notifyStatusCallbacks({ status: 'global_failed' });
     }
   }
 
@@ -243,6 +354,33 @@ export class WebSocketService {
         callback(message);
       } catch (error) {
         console.error(`Ошибка в обработчике №${index + 1} для сообщения ${message.id || 'без ID'}:`, error);
+      }
+    });
+  }
+
+  // Оповещение обработчиков о новых глобальных сообщениях
+  _notifyGlobalMessageCallbacks(message) {
+    console.log('Начало обработки глобального сообщения через WebSocket:', message);
+    
+    // Проверяем и устанавливаем временную метку, если её нет
+    if (!message.timestamp) {
+      console.log(`Устанавливаем временную метку для глобального сообщения ${message.id || 'без ID'}`);
+      message.timestamp = new Date().toISOString();
+    }
+    
+    // Логируем сообщение перед отправкой обработчикам
+    console.log(`Отправляем глобальное сообщение ${message.id || 'без ID'} для чата ${message.chat_id || 'неизвестно'} в ${this.globalMessageCallbacks.length} обработчиков`);
+    
+    if (this.globalMessageCallbacks.length === 0) {
+      console.warn('Нет активных обработчиков глобальных сообщений!');
+    }
+    
+    this.globalMessageCallbacks.forEach((callback, index) => {
+      try {
+        console.log(`Вызов обработчика глобальных сообщений №${index + 1} для сообщения ${message.id || 'без ID'}`);
+        callback(message);
+      } catch (error) {
+        console.error(`Ошибка в обработчике глобальных сообщений №${index + 1} для сообщения ${message.id || 'без ID'}:`, error);
       }
     });
   }

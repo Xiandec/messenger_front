@@ -49,6 +49,11 @@ export const chatService = {
     return apiRequest('/chats', 'GET', null, token);
   },
   
+  // Получение списка чатов пользователя с последними сообщениями
+  async getChatsWithLastMessages(token) {
+    return apiRequest('/chats/with-last-message', 'GET', null, token);
+  },
+  
   // Получение информации о чате по ID
   async getChatById(chatId, token) {
     return apiRequest(`/chats/${chatId}`, 'GET', null, token);

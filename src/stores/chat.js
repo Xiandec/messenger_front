@@ -2,6 +2,10 @@ import { defineStore } from 'pinia';
 import { chatService, messageService } from '../services/api';
 import { useAuthStore } from './auth';
 import { v4 as uuidv4 } from 'uuid';
+import { webSocketService } from '../services/websocket';
+
+// Для работы с уведомлениями
+import { useToast } from 'vue-toastification';
 
 export const useChatStore = defineStore('chat', {
   state: () => ({
@@ -9,7 +13,13 @@ export const useChatStore = defineStore('chat', {
     currentChat: null,
     messages: {},
     loading: false,
-    error: null
+    error: null,
+    // Состояние соединения глобального WebSocket
+    globalWebSocketStatus: 'disconnected',
+    // Кэш для предотвращения дублирования уведомлений
+    notificationCache: new Set(),
+    // Флаг, указывающий, что глобальный вебсокет уже инициализирован
+    globalWebSocketInitialized: false
   }),
 
   getters: {
@@ -32,16 +42,34 @@ export const useChatStore = defineStore('chat', {
       this.error = null;
       
       try {
-        const chats = await chatService.getChats(authStore.getToken);
+        // Используем новый метод API для получения чатов с последними сообщениями
+        const chats = await chatService.getChatsWithLastMessages(authStore.getToken);
         
-        // Сохраняем чаты и сортируем их
-        this.chats = chats;
+        // Преобразуем список чатов с информацией о последних сообщениях
+        this.chats = chats.map(chat => {
+          return {
+            ...chat,
+            lastMessage: chat.last_message?.text || '',
+            lastMessageTime: chat.last_message?.timestamp || '',
+            unreadCount: chat.unread_count || 0
+          };
+        });
+        
+        // Сортируем чаты по времени последнего сообщения
         this._sortChatsByLastMessage();
         
         return chats;
       } catch (error) {
-        this.error = error.message;
-        throw error;
+        // Fallback на старый метод в случае ошибки
+        try {
+          const chats = await chatService.getChats(authStore.getToken);
+          this.chats = chats;
+          this._sortChatsByLastMessage();
+          return chats;
+        } catch (fallbackError) {
+          this.error = fallbackError.message;
+          throw fallbackError;
+        }
       } finally {
         this.loading = false;
       }
@@ -330,23 +358,53 @@ export const useChatStore = defineStore('chat', {
         message.timestamp = new Date().toISOString();
       }
       
-      // Обновляем превью чата с новым сообщением
-      this.updateChatPreview(chatId, message.text, message.timestamp);
+      // Найдем чат в списке
+      const chatIndex = this.chats.findIndex(chat => chat.id === chatId);
+      
+      if (chatIndex !== -1) {
+        // Обновляем информацию о последнем сообщении и счетчике непрочитанных
+        const chat = { ...this.chats[chatIndex] };
+        
+        // Обновляем последнее сообщение, только если новое сообщение свежее текущего
+        const newMessageTime = new Date(message.timestamp);
+        const currentMessageTime = chat.lastMessageTime ? new Date(chat.lastMessageTime) : null;
+        
+        if (!currentMessageTime || newMessageTime > currentMessageTime) {
+          chat.lastMessage = message.text;
+          chat.lastMessageTime = message.timestamp;
+          
+          // Увеличиваем счетчик непрочитанных только если:
+          // 1. Сообщение не от текущего пользователя
+          // 2. Сообщение не прочитано
+          // 3. Это не текущий открытый чат
+          const authStore = useAuthStore();
+          if (message.sender_id !== authStore.getUserId && 
+              !message.is_read && 
+              (!this.currentChat || this.currentChat.id !== chatId)) {
+            chat.unreadCount = (chat.unreadCount || 0) + 1;
+          }
+          
+          // Обновляем чат в списке
+          this.chats[chatIndex] = chat;
+          
+          // Если это текущий открытый чат, обновляем и его
+          if (this.currentChat && this.currentChat.id === chatId) {
+            this.currentChat = chat;
+          }
+          
+          // Сортируем список чатов по времени последнего сообщения
+          this._sortChatsByLastMessage();
+        }
+      } else {
+        console.log(`Чат с ID ${chatId} не найден в списке, загружаем информацию о нем`);
+        this.fetchChatById(chatId).catch(error => {
+          console.error('Ошибка при загрузке информации о чате:', error);
+        });
+      }
       
       // Если это текущий открытый чат, добавляем сообщение в список сообщений
       if (this.currentChat && this.currentChat.id === chatId) {
-        // Добавляем сообщение в текущий список сообщений, если его еще нет
-        if (this.messages[chatId]) {
-          // Проверяем, нет ли уже такого сообщения (чтобы избежать дублирования)
-          const messageExists = this.messages[chatId].some(m => m.id === message.id);
-          if (!messageExists) {
-            // Добавляем новое сообщение в конец (будет самым новым)
-            this.messages[chatId].push(message);
-            
-            // Сортируем сообщения по времени (старые сверху, новые снизу)
-            this.messages[chatId].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-          }
-        }
+        this.addMessage(message);
       }
     },
 
@@ -441,6 +499,228 @@ export const useChatStore = defineStore('chat', {
         }
       } else {
         console.log(`Сообщение для чата ${chatId} не является новейшим, пропускаем обновление превью`);
+      }
+    },
+
+    // Инициализировать подключение к глобальному WebSocket
+    initGlobalWebSocket() {
+      const authStore = useAuthStore();
+      if (!authStore.isAuthenticated) {
+        console.warn('Нельзя инициализировать глобальный WebSocket без авторизации');
+        return;
+      }
+      
+      // Проверяем, был ли уже инициализирован глобальный WebSocket
+      if (this.globalWebSocketInitialized) {
+        console.log('Глобальный WebSocket уже инициализирован, пропускаем повторную инициализацию');
+        return;
+      }
+      
+      console.log('Инициализация глобального WebSocket');
+      
+      // Отключаем предыдущее подключение, если есть
+      webSocketService.disconnectGlobal();
+      
+      // Подключаемся к глобальному WebSocket
+      webSocketService.connectGlobal(authStore.getToken);
+      
+      // Устанавливаем обработчики для глобальных сообщений
+      webSocketService.onGlobalMessage(this.handleGlobalMessage.bind(this));
+      webSocketService.onStatusChange(this.handleWebSocketStatus.bind(this));
+      webSocketService.onError(this.handleWebSocketError.bind(this));
+      
+      // Меняем статус подключения
+      this.globalWebSocketStatus = 'connecting';
+      this.globalWebSocketInitialized = true;
+    },
+    
+    // Обработчик для глобальных сообщений
+    handleGlobalMessage(message) {
+      console.log('Получено глобальное сообщение:', message);
+      
+      if (!message || !message.chat_id) {
+        console.error('Ошибка: в глобальном сообщении отсутствует chat_id');
+        return;
+      }
+      
+      // Проверяем, обрабатывали ли мы уже это сообщение для уведомлений
+      const messageId = message.id || message.client_message_id;
+      const cacheKey = `notification-${messageId}-${message.chat_id}`;
+      
+      if (this.notificationCache.has(cacheKey)) {
+        console.log(`Сообщение ${messageId} уже было обработано для уведомлений, пропускаем`);
+        return;
+      }
+      
+      // Добавляем сообщение в кэш уведомлений
+      this.notificationCache.add(cacheKey);
+      
+      // Ограничиваем размер кэша
+      if (this.notificationCache.size > 100) {
+        const firstItem = this.notificationCache.values().next().value;
+        this.notificationCache.delete(firstItem);
+      }
+      
+      // Получаем ID текущего пользователя
+      const authStore = useAuthStore();
+      const currentUserId = authStore.getUserId;
+      
+      // Обновляем информацию о чате с последним сообщением
+      this.updateChatWithLastMessage(message);
+      
+      // Проверяем, является ли сообщение от другого пользователя (не от текущего)
+      if (message.sender_id !== currentUserId) {
+        // Показываем уведомление о новом сообщении, только если это не текущий открытый чат
+        if (!this.currentChat || this.currentChat.id !== message.chat_id) {
+          const chat = this.chats.find(c => c.id === message.chat_id);
+          if (chat) {
+            this.showMessageNotification(message, chat);
+          }
+        }
+      }
+      
+      // Если чат с таким ID еще не загружен, загружаем его
+      const chatExists = this.chats.some(chat => chat.id === message.chat_id);
+      if (!chatExists) {
+        this.fetchChatById(message.chat_id).catch(error => {
+          console.error(`Ошибка при загрузке чата ${message.chat_id}:`, error);
+        });
+      }
+    },
+    
+    // Показ уведомления о новом сообщении
+    showMessageNotification(message, chat) {
+      try {
+        // Пропускаем уведомления от себя
+        const authStore = useAuthStore();
+        if (message.sender_id === authStore.getUserId) {
+          return;
+        }
+        
+        // Создаем экземпляр toast уведомления
+        const toast = useToast();
+        
+        // Формируем текст уведомления
+        const senderName = message.sender_name || 'Неизвестный отправитель';
+        const chatName = chat.name || this.getChatName(chat);
+        const messageText = message.text.length > 30 
+          ? message.text.substring(0, 30) + '...' 
+          : message.text;
+          
+        // Отображаем уведомление
+        toast.info(`${senderName} в ${chatName}: ${messageText}`, {
+          timeout: 5000,
+          onClick: () => {
+            // При клике на уведомление открываем чат
+            this.setCurrentChat(chat);
+            // Если используется маршрутизация Vue Router
+            try {
+              const router = window.router; // Предполагается, что роутер доступен глобально
+              if (router) {
+                router.push({ name: 'chat', params: { id: chat.id } });
+              }
+            } catch (e) {
+              console.error('Ошибка при переходе к чату:', e);
+            }
+          }
+        });
+      } catch (error) {
+        console.error('Ошибка при отображении уведомления:', error);
+      }
+    },
+    
+    // Получить название чата для отображения
+    getChatName(chat) {
+      if (chat.name) return chat.name;
+      
+      // Если это личный чат, вернем имя собеседника
+      if (chat.type === 'personal' && chat.members && chat.members.length > 0) {
+        const authStore = useAuthStore();
+        const currentUserId = authStore.getUserId;
+        
+        // Найдем собеседника (не текущего пользователя)
+        const otherMember = chat.members.find(m => m.id !== currentUserId);
+        if (otherMember) {
+          return otherMember.name || otherMember.email || 'Собеседник';
+        }
+      }
+      
+      return 'Чат';
+    },
+    
+    // Обработчик статуса WebSocket
+    handleWebSocketStatus(status) {
+      console.log('Изменение статуса WebSocket:', status);
+      
+      if (status.status === 'global_connected') {
+        this.globalWebSocketStatus = 'connected';
+      } else if (status.status === 'global_disconnected' || status.status === 'global_failed') {
+        this.globalWebSocketStatus = 'disconnected';
+        
+        // Пытаемся восстановить соединение через некоторое время
+        setTimeout(() => {
+          if (this.globalWebSocketStatus === 'disconnected') {
+            console.log('Попытка восстановить глобальное WebSocket-соединение');
+            // Сбрасываем флаг инициализации перед переподключением
+            this.globalWebSocketInitialized = false;
+            this.initGlobalWebSocket();
+          }
+        }, 5000); // Повторная попытка через 5 секунд
+      } else if (status.status === 'global_reconnecting') {
+        this.globalWebSocketStatus = 'reconnecting';
+      }
+    },
+    
+    // Обработчик ошибок WebSocket
+    handleWebSocketError(error) {
+      console.error('Ошибка WebSocket:', error);
+      this.error = error;
+    },
+
+    // Обновить счетчик непрочитанных сообщений для чата
+    updateUnreadCount(chatId, count) {
+      const chatIndex = this.chats.findIndex(chat => chat.id === chatId);
+      if (chatIndex !== -1) {
+        const chat = { ...this.chats[chatIndex] };
+        chat.unreadCount = Math.max(0, count); // Убеждаемся, что счетчик не отрицательный
+        this.chats[chatIndex] = chat;
+        
+        // Если это текущий открытый чат, обновляем и его
+        if (this.currentChat && this.currentChat.id === chatId) {
+          this.currentChat = { ...this.currentChat, unreadCount: chat.unreadCount };
+        }
+      }
+    },
+    
+    // Сбросить счетчик непрочитанных сообщений для чата
+    resetUnreadCount(chatId) {
+      this.updateUnreadCount(chatId, 0);
+    },
+    
+    // Пометить все сообщения в чате как прочитанные
+    async markAllMessagesAsRead(chatId) {
+      const authStore = useAuthStore();
+      
+      if (!authStore.isAuthenticated) {
+        throw new Error('Пользователь не авторизован');
+      }
+      
+      this.resetUnreadCount(chatId);
+      
+      // Получаем все непрочитанные сообщения в текущем чате
+      if (this.messages[chatId]) {
+        const unreadMessages = this.messages[chatId].filter(
+          msg => !msg.is_read && msg.sender_id !== authStore.getUserId
+        );
+        
+        // Отмечаем каждое сообщение как прочитанное
+        for (const message of unreadMessages) {
+          try {
+            await this.markMessageAsRead(message.id, chatId);
+          } catch (error) {
+            console.error(`Ошибка при отметке сообщения ${message.id} как прочитанного:`, error);
+          }
+        }
       }
     }
   }

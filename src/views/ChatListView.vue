@@ -28,8 +28,13 @@
             <div class="chat-name">{{ getChatName(chat) }}</div>
             <div class="chat-preview">{{ chat.lastMessage || 'Нет сообщений' }}</div>
           </div>
-          <div class="chat-time" v-if="chat.lastMessageTime">
-            {{ formatTime(chat.lastMessageTime) }}
+          <div class="chat-meta">
+            <div class="chat-time" v-if="chat.lastMessageTime">
+              {{ formatTime(chat.lastMessageTime) }}
+            </div>
+            <div class="unread-badge" v-if="chat.unreadCount && chat.unreadCount > 0">
+              {{ chat.unreadCount > 99 ? '99+' : chat.unreadCount }}
+            </div>
           </div>
         </div>
       </div>
@@ -182,9 +187,24 @@ function formatTime(timestamp) {
 }
 
 // Выбор чата
-function selectChat(chat) {
+async function selectChat(chat) {
   chatStore.setCurrentChat(chat);
+  
+  // Переходим к чату
   router.push(`/chats/${chat.id}`);
+  
+  // Если в чате есть непрочитанные сообщения, отмечаем их как прочитанные
+  if (chat.unreadCount && chat.unreadCount > 0) {
+    try {
+      // Сбрасываем счетчик непрочитанных сообщений в UI сразу
+      chatStore.resetUnreadCount(chat.id);
+      
+      // Отправляем запрос на сервер для отметки всех сообщений как прочитанных
+      await chatStore.markAllMessagesAsRead(chat.id);
+    } catch (error) {
+      console.error('Ошибка при отметке сообщений как прочитанных:', error);
+    }
+  }
 }
 
 // Создание нового чата
@@ -234,50 +254,11 @@ async function createChat() {
   }
 }
 
-// Переменная для хранения функции отписки
-let wsCleanup = null;
-
 // Настройка глобального WebSocket для обновления списка чатов
 function setupGlobalWebSocket() {
-  // Отключаемся от предыдущего WebSocket, если он существует
-  if (wsCleanup) {
-    wsCleanup();
-    wsCleanup = null;
-  }
-  
-  console.log('ChatListView: Настройка глобального обработчика WebSocket для обновления списка чатов');
-  
-  // Глобальный WebSocket слушает только события для обновления списка чатов
-  wsCleanup = webSocketService.onMessage((message) => {
-    console.log('ChatListView: Получено сообщение через WebSocket:', message);
-    
-    if (!message) {
-      console.warn('ChatListView: Получено пустое сообщение');
-      return;
-    }
-    
-    // Проверяем наличие chat_id в сообщении
-    if (!message.chat_id) {
-      console.warn('ChatListView: Сообщение не содержит chat_id, пропускаем');
-      return;
-    }
-    
-    // Убеждаемся, что timestamp существует
-    if (!message.timestamp) {
-      console.log(`ChatListView: Устанавливаем временную метку для сообщения в чате ${message.chat_id}`);
-      message.timestamp = new Date().toISOString();
-    }
-    
-    console.log(`ChatListView: Обрабатываем новое сообщение для чата ${message.chat_id}`);
-    
-    // Обновляем информацию о чате с последним сообщением
-    if (message.text && message.timestamp) {
-      console.log(`ChatListView: Обновляем превью чата ${message.chat_id} текстом сообщения: ${message.text.substring(0, 20)}...`);
-      chatStore.updateChatPreview(message.chat_id, message.text, message.timestamp);
-    } else {
-      console.warn(`ChatListView: Сообщение не содержит текст или метку времени для чата ${message.chat_id}`);
-    }
-  });
+  // Функция-заглушка, теперь вся обработка происходит 
+  // через единый глобальный WebSocket в хранилище
+  console.log('ChatListView: Глобальный WebSocket уже настроен в хранилище');
 }
 
 // Загружаем список чатов при монтировании компонента
@@ -301,8 +282,8 @@ onMounted(async () => {
       });
     });
     
-    // Настраиваем WebSocket для обновления чатов
-    setupGlobalWebSocket();
+    // Глобальный WebSocket теперь инициализируется в main.js
+    // и обрабатывается в хранилище чатов
   } catch (error) {
     console.error('Ошибка при загрузке чатов:', error);
   }
@@ -310,10 +291,7 @@ onMounted(async () => {
 
 // Отключаем WebSocket при размонтировании компонента
 onUnmounted(() => {
-  if (wsCleanup) {
-    wsCleanup();
-    wsCleanup = null;
-  }
+  // Локальные обработчики больше не нужны, так как используется централизованный подход
 });
 </script>
 
@@ -385,47 +363,44 @@ onUnmounted(() => {
 
 .chat-item {
   display: flex;
-  align-items: center;
-  padding: var(--spacing-sm);
-  border-radius: var(--radius-md);
-  margin-bottom: var(--spacing-sm);
+  padding: 12px 15px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   cursor: pointer;
-  transition: background-color var(--transition-fast);
+  transition: background-color 0.2s;
   position: relative;
 }
 
 .chat-item:hover {
-  background-color: var(--color-surface-variant);
+  background-color: rgba(0, 0, 0, 0.03);
 }
 
 .chat-item.active {
-  background-color: rgba(147, 112, 219, 0.2);
+  background-color: rgba(103, 58, 183, 0.1);
 }
 
 .chat-avatar {
-  width: 2.5rem;
-  height: 2.5rem;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  background-color: var(--color-primary);
+  background-color: #673AB7;
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 500;
-  margin-right: var(--spacing-sm);
+  font-weight: bold;
+  margin-right: 12px;
   flex-shrink: 0;
 }
 
 .chat-info {
   flex: 1;
   min-width: 0;
-  margin-right: var(--spacing-sm);
+  overflow: hidden;
 }
 
 .chat-name {
   font-weight: 500;
-  color: var(--color-text-primary);
-  margin-bottom: 0.125rem;
+  margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -433,17 +408,39 @@ onUnmounted(() => {
 
 .chat-preview {
   font-size: 0.85rem;
-  color: var(--color-text-secondary);
+  color: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.chat-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-left: 8px;
+  min-width: 60px;
+}
+
 .chat-time {
   font-size: 0.75rem;
-  color: var(--color-text-secondary);
-  align-self: flex-start;
-  margin-top: 0.25rem;
+  color: rgba(255, 255, 255, 0.5);
+  margin-bottom: 5px;
+}
+
+.unread-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background-color: #673AB7;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: bold;
+  padding: 0 6px;
 }
 
 .no-chats {

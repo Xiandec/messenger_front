@@ -6,6 +6,7 @@ export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: localStorage.getItem(STORAGE_KEYS.TOKEN) || null,
     userId: localStorage.getItem(STORAGE_KEYS.USER_ID) || null,
+    userName: localStorage.getItem(STORAGE_KEYS.USER_NAME) || null,
     userData: JSON.parse(localStorage.getItem(STORAGE_KEYS.USER_DATA) || 'null'),
     loading: false,
     error: null
@@ -15,9 +16,9 @@ export const useAuthStore = defineStore('auth', {
     isAuthenticated: (state) => !!state.token,
     getToken: (state) => state.token,
     getUserId: (state) => state.userId,
-    getUserEmail: (state) => state.user?.email,
-    getUserName: (state) => state.user?.name,
-    getUser: (state) => state.user
+    getUserEmail: (state) => state.userData?.email,
+    getUserName: (state) => state.userName || state.userData?.name,
+    getUser: (state) => state.userData
   },
 
   actions: {
@@ -47,9 +48,13 @@ export const useAuthStore = defineStore('auth', {
         
         this.token = response.access_token;
         this.userId = response.user_id;
+        this.userName = response.name;
         
         localStorage.setItem(STORAGE_KEYS.TOKEN, this.token);
         localStorage.setItem(STORAGE_KEYS.USER_ID, this.userId);
+        if (response.name) {
+          localStorage.setItem(STORAGE_KEYS.USER_NAME, response.name);
+        }
         
         return response;
       } catch (error) {
@@ -64,16 +69,22 @@ export const useAuthStore = defineStore('auth', {
     logout() {
       this.token = null;
       this.userId = null;
+      this.userName = null;
       this.userData = null;
       
       localStorage.removeItem(STORAGE_KEYS.TOKEN);
       localStorage.removeItem(STORAGE_KEYS.USER_ID);
+      localStorage.removeItem(STORAGE_KEYS.USER_NAME);
       localStorage.removeItem(STORAGE_KEYS.USER_DATA);
     },
 
     // Установка данных пользователя
     setUserData(userData) {
       this.userData = userData;
+      if (userData?.name) {
+        this.userName = userData.name;
+        localStorage.setItem(STORAGE_KEYS.USER_NAME, userData.name);
+      }
       localStorage.setItem(STORAGE_KEYS.USER_DATA, JSON.stringify(userData));
     }
   }
